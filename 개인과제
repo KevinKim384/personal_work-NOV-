@@ -1,0 +1,149 @@
+#사용환경을 준비! 참고로 저는 환경변수에 넣었기 때문에(공유가 아니라 제가 이미 돈을 넣어서 제 계정으로 된 API를 쓰고 있습니다!)
+#os.getenv를 통해 제 환경변수에 있는 API키 가져오기! 그리고 불필요한 경고문 제거를 위해 warnings 추가
+import os
+import openai
+openai.api_key = os.getenv("OPENAI_API_KEY")
+import warnings
+warnings.filterwarnings(action = 'ignore')
+
+from langchain_openai import ChatOpenAI
+from langchain.document_loaders import PyPDFLoader
+
+client = ChatOpenAI(model = 'gpt-4o', temperature = 0.5, max_tokens = 2000)
+#PyPDFLoader를 통해 pdf 파일 모델 불러오기!
+loader = PyPDFLoader('C:\\Users\\kevinkim\\OneDrive\\바탕 화면\\Sparta_Work\\초거대 언어모델 연구 동향.pdf')
+docs = loader.load()
+
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+#요건 RecursiveCharacterTextSplitter: CharacterTextSplitter와 유사하지만, 더 복잡한 분할 방식을 제공
+recursive_text_splitter = RecursiveCharacterTextSplitter(
+    #chunk_size: 각 청크의 최대 길이
+    chunk_size=500,
+    #chunk_overlap: 청크 간 겹침의 길이
+    chunk_overlap=10,
+    #lenth_function: 텍스트 청크의 길이를 계산하는 데 사용하는 함수(기본적으로 len 함수 사용)
+    length_function=len,
+    #is_separator_regex: 지정한 구분자가 정규식인지 여부를 지정하는 플래그
+    is_separator_regex=False,
+)
+splitted_docs = recursive_text_splitter.split_documents(docs)
+
+#이것은 CharacterTextSplitter: 텍스트를 일정한 길이나 규칙에 따라 분할하는 단순한 방법을 제공. 
+#CharacterTextSplitter와 비슷한 방식으로 텍스트를 나누고, 
+#나누어진 조각이 여전히 너무 길면 다시 재귀적으로 분할을 시도
+#text_splitter = CharacterTextSplitter(
+    #separator="\n\n", -> 텍스트 분할 시 사용할 구분자
+    #chunk_size=100, -> 설명 완료
+    #chunk_overlap=10,-> 설명 완료
+    #length_function=len,-> 설명 완료
+    #is_separator_regex=False,-> 설명 완료
+#)
+#splits = text_splitter.split_documents(docs)
+
+#너무 길어서 여기는 주석처리로... enumerate을 통해 index와 각 청크를 따로 분리 후, 
+#for i, splitted in enumerate(splitted_docs[:50]):
+    #print(f'Chunk {i+1}:')
+    #print(splitted)
+    #print('=' * 50)
+
+from langchain_openai import OpenAIEmbeddings
+from uuid import uuid4
+import faiss
+from langchain.vectorstores import Chroma
+embeddings = OpenAIEmbeddings(model = 'text-embedding-ada-002')
+
+#from_documents를 통해 쉽게 vector_store 생성
+vector_store = Chroma.from_documents(documents = splitted_docs, embedding = embeddings)
+#심심하니 uuid4를 사용해 이미 chunk로 변한 값들을 고유한 코드로 된 값들로 다시 변경(이러면 PC가 사용하기 더 쉬워진다나 뭐라나...)
+uuids = [str(uuid4()) for _ in range(len(splitted_docs))]
+vector_store.add_documents(documents = splitted_docs, ids = uuids)
+
+from langchain.chains import RetrievalQA
+from langchain.chains import LLMChain
+#여기서는 평병하게 retriever를 구성하였습니다.
+#Chroma에서 이 부분 llm = client를 통해 쉽게 LLM에 연결이 가능합니다.
+retriever = vector_store.as_retriever(search_type = 'similarity', search_kwargs = {'k':5})
+#여기서는 RetrieveralQA를 써서 질문과 답변을 받을 수 있게 만드는 함수
+qa_retriever = RetrievalQA.from_chain_type(
+    llm = client,
+    chain_type = 'refine',
+    retriever = retriever,
+    return_source_documents = True,
+)
+
+import logging
+#만약 질문을 계속 받을시에 작동할 while True: 하지만 비교를 위해 못 쓴다는...
+#query로 답을 받아, 그것을 토대로 값을 출
+#while True:
+query = input('질문을 해주세요:')
+#if query == 'exit':
+    #print('좋은 대화였습니다!')
+    #break
+result = qa_retriever(query)
+answer_a = result['result']
+source_documents = result['source_documents']
+
+    # 결과 출력
+print("Answer:", answer_a)
+#하지만 QA특성상 추출할 값도 가져와야 하는데, 값을 가져오고 띄우지는 못하게 하는 코드
+logging.info("Source Documents: %s", source_documents)
+
+#일반 LLM 모델인 GPT를 이용해 같은 질문을 받아 출력 비교
+from openai import OpenAI
+client2 = OpenAI()
+completion = client2.chat.completions.create(
+    model = 'gpt-4o',
+    messages = [
+        {'role' : 'system', 'content' : '넌 초거대 언어모델 연구 동향에 대해 설명해주는 AI야. 여러 관련 모델들과 지식들을 설명해줘.'},
+        {'role' : 'user', 'content' : 'query'}
+    ]
+)
+answer_b = completion.choices[0].message.content
+print(answer_b)
+
+#A가 더 좋다는 답변을 받았다! 즉, 내가 만든 값이 더 정확하고 좋다는 뜻!
+prompt = f"""[System]
+Please act as an impartial judge and evaluate the quality of the responses provided by two
+AI assistants to the user question displayed below. You should choose the assistant that
+follows the user's instructions and answers the user's question better. Your evaluation
+should consider factors such as the helpfulness, relevance, accuracy, depth, creativity,
+and level of detail of their responses. Begin your evaluation by comparing the two
+responses and provide a short explanation. Avoid any position biases and ensure that the
+order in which the responses were presented does not influence your decision. Do not allow
+the length of the responses to influence your evaluation. Do not favor certain names of
+the assistants. Be as objective as possible. After providing your explanation, output your
+final verdict by strictly following this format: "[[A]]" if assistant A is better, "[[B]]"
+if assistant B is better, and "[[C]]" for a tie.
+
+[User Question]
+{query}
+
+[The Start of Assistant A's Answer]
+{answer_a}
+[The End of Assistant A's Answer]
+
+[The Start of Assistant B's Answer]
+{answer_b}
+[The End of Assistant B's Answer]"""
+
+completion = client2.chat.completions.create(
+    model = 'gpt-4o',
+    messages = [
+        {'role' : 'user', 'content' : prompt}
+    ]
+)
+final = completion.choices[0].message.content
+print(final)
+
+"""RAG 모델은 먼저 입력된 질문과 관련된 정보를 검색하고, 그 정보를 바탕으로 답변을 생성합니다. 
+이렇게 하면 모델이 정확하고 최신의 정보를 기반으로 답변을 생성할 수 있습니다.
+특히 Chroma와 같은 벡터 데이터베이스를 사용하여 RAG 모델을 구현할 때, 모델의 성능을 크게 향상시킬 수 있습니다.
+특히 Chroma는 벡터 데이터베이스로, 문서나 텍스트 데이터를 벡터화하여 빠르고 효율적인 검색을 지원하는데, RAG 모델에서 Chroma와 같은 검색 시스템을 사용하면, 
+모델이 실시간으로 관련 정보를 빠르게 검색하고, 그 정보를 바탕으로 더 적합한 답변을 생성할 수 있습니다.
+한 마디로 LLM 같은 대규모 랭귀지 모델에서 RAG를 통해 최신 정보를 토대로 정확한 답을 생성해낼 수 있기 때문입니다."""
+
+#한번 해보고 싶었던..
+from rouge import Rouge
+rouge = Rouge()
+score = rouge.get_scores(answer_a, answer_b)
+print(score)
